@@ -11,6 +11,7 @@ SECTION_INDICATORS = [
     "पद", "चौपाई", "कवित्त", "छप्पय", "सार", "उत्तर"
 ]
 
+
 # Font size thresholds (from PDF analysis)
 BODY_FONT_MIN = 18.0   # Body text >= this
 PAGE_NUM_MAX = 12.0     # Page numbers <= this
@@ -122,6 +123,8 @@ def parse_pdf_spans(pdf_path: str):
             for line in block["lines"]:
                 line_text_parts = []
                 max_font_size = 0.0
+                line_bbox = line.get("bbox", [0, 0, 0, 0])
+                line_x0 = line_bbox[0]
 
                 for span in line["spans"]:
                     font = span.get("font", "")
@@ -144,22 +147,23 @@ def parse_pdf_spans(pdf_path: str):
                 all_lines.append({
                     "text": line_text,
                     "font_size": max_font_size,
-                    "page_num": page_num + 1
+                    "page_num": page_num + 1,
+                    "x0": line_x0
                 })
 
     pdf.close()
     return all_lines
 
 
-def classify_line(line_data: dict) -> str:
+def classify_line(line_data: dict, margin_threshold: float = 64.5) -> str:
     """
     Classify line: 'page_number', 'section_indicator', 'vachan', 'meaning', 'skip'
     
-    Key insight: vachan text has ।। as verse separators throughout the line.
-    Meaning text is prose — may end with ।।{number}।। but no ।। in body.
+    Key insight: vachan text is indented (x0 >= margin_threshold) while meaning text is full-width (x0 < margin_threshold).
     """
     text = line_data["text"]
     size = line_data["font_size"]
+    x0 = line_data.get("x0", 0.0)
 
     if not text.strip():
         return "skip"
@@ -170,6 +174,9 @@ def classify_line(line_data: dict) -> str:
         if re.match(r"^[०१२३४५६७८९\d\s]+$", stripped):
             return "page_number"
         if is_section_indicator(text) or is_structural_header(text):
+            return "section_indicator"
+        cleaned = clean_text(text)
+        if len(cleaned) < 80 and ("।।" in text or "।" in text):
             return "section_indicator"
         return "skip"
 
@@ -193,8 +200,8 @@ def classify_line(line_data: dict) -> str:
     if is_structural_header(text):
         return "section_indicator"
 
-    # KEY: check for ।। verse separators AFTER stripping trailing number
-    if has_verse_separators(text):
+    # Margin check: Indented text is verse, left-aligned is meaning
+    if x0 >= margin_threshold:
         return "vachan"
 
     # Prose text = meaning/explanation
@@ -210,15 +217,33 @@ def parse_and_ingest_pdf(pdf_path: str, book_name: str, document_id: str, db: Se
     try:
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
-
         print(f"Parsing: {pdf_path} -> '{book_name}'")
-
         lines = parse_pdf_spans(pdf_path)
         print(f"  {len(lines)} raw lines extracted")
 
+        # Determine dynamic margin threshold for classifying indented verses vs left-aligned prose
+        body_lines = [
+            ld for ld in lines 
+            if ld["font_size"] >= BODY_FONT_MIN and len(ld["text"]) > 30
+        ]
+        doc_left_margin = 63.2
+        if body_lines:
+            x0_values = sorted(ld["x0"] for ld in body_lines if "x0" in ld)
+            if x0_values:
+                # Use 5th percentile to avoid left-overflowing outliers
+                idx = max(0, int(len(x0_values) * 0.05))
+                doc_left_margin = x0_values[idx]
+        
+        if doc_left_margin > 85.0:
+            margin_threshold = 0.0
+        else:
+            margin_threshold = doc_left_margin + 2.0
+
+        print(f"  Dynamic margin: base={doc_left_margin:.2f}, threshold={margin_threshold:.2f}")
+
         # Classify
         for ld in lines:
-            ld["type"] = classify_line(ld)
+            ld["type"] = classify_line(ld, margin_threshold)
 
         # Get or create book
         book = db.query(Book).filter(Book.name == book_name).first()
@@ -239,6 +264,7 @@ def parse_and_ingest_pdf(pdf_path: str, book_name: str, document_id: str, db: Se
         vachan_seq = 0
         previous_vachan_number = 0
         last_section_keyword = None
+        current_vachan_num = None
 
         # Accumulate current vachan
         temp_original = []
@@ -250,12 +276,36 @@ def parse_and_ingest_pdf(pdf_path: str, book_name: str, document_id: str, db: Se
                 return None
             return extract_vachan_number(" ".join(temp_original))
         
-        def should_reset_section(new_vachan_num, keyword_triggered=False):
+        # Look ahead helper to check if the upcoming vachan block resets numbering
+        def lookahead_resets_numbering(start_idx: int) -> bool:
+            for idx in range(start_idx, len(lines)):
+                ld = lines[idx]
+                t = ld["type"]
+                if t == "section_indicator":
+                    break
+                if t == "meaning":
+                    num = extract_vachan_number(ld["text"])
+                    if num is not None:
+                        return num <= 2
+                    break
+                if t == "vachan":
+                    num = extract_vachan_number(ld["text"])
+                    if num is not None:
+                        return num <= 2
+            return False
+
+        def should_reset_section(new_vachan_num, keyword_triggered=False, current_line_idx=0):
             """
             Determine if we should create a new section.
             Returns True if: numeric drop detected (new < 50% of previous), OR keyword indicates new category
             """
             nonlocal previous_vachan_number, last_section_keyword
+            
+            # If we have a pending major metre keyword, previous vachan count is > 5,
+            # and upcoming vachan number resets to 1 or 2, reset immediately.
+            if keyword_triggered and last_section_keyword and previous_vachan_number > 5:
+                if lookahead_resets_numbering(current_line_idx):
+                    return True
             
             if new_vachan_num is None or previous_vachan_number == 0:
                 return False
@@ -271,7 +321,7 @@ def parse_and_ingest_pdf(pdf_path: str, book_name: str, document_id: str, db: Se
             return False
 
         def flush_vachan():
-            nonlocal vachan_seq
+            nonlocal vachan_seq, current_vachan_num
             if not temp_original:
                 return
 
@@ -303,6 +353,7 @@ def parse_and_ingest_pdf(pdf_path: str, book_name: str, document_id: str, db: Se
             db.add(vachan)
             temp_original.clear()
             temp_meaning.clear()
+            current_vachan_num = None
 
         default_section_created = False
 
@@ -314,13 +365,12 @@ def parse_and_ingest_pdf(pdf_path: str, book_name: str, document_id: str, db: Se
                 meaning_text, next_vachan_text = split_meaning_vachan_line(text)
                 if next_vachan_text:
                     meaning_item = {**item, "type": "meaning", "text": meaning_text}
-                    vachan_item = {**item, "text": next_vachan_text}
-                    vachan_item["type"] = classify_line(vachan_item)
+                    vachan_item = {**item, "text": next_vachan_text, "type": "vachan"}
                     return [meaning_item, vachan_item]
 
             return [item]
 
-        for raw_item in lines:
+        for line_idx, raw_item in enumerate(lines):
             for item in logical_items(raw_item):
                 line_type = item["type"]
                 text = item["text"]
@@ -354,20 +404,25 @@ def parse_and_ingest_pdf(pdf_path: str, book_name: str, document_id: str, db: Se
                         current_section = section
                         default_section_created = True
 
-                    # New vachan line after meaning -> flush previous
-                    if temp_meaning:
-                        flush_vachan()
-
                     # Extract vachan number to check for category reset
                     new_vachan_num = extract_vachan_number(text)
+
+                    # If we see a different vachan number, flush first
+                    if new_vachan_num is not None and current_vachan_num is not None and new_vachan_num != current_vachan_num:
+                        flush_vachan()
+                        current_vachan_num = new_vachan_num
+                    elif new_vachan_num is not None:
+                        current_vachan_num = new_vachan_num
+
                     keyword_was_present = last_section_keyword is not None
                     
                     # Check if we should create a new section (numeric drop or keyword + reset)
-                    if should_reset_section(new_vachan_num, keyword_was_present):
+                    if should_reset_section(new_vachan_num, keyword_was_present, line_idx):
                         flush_vachan()
                         section_seq += 1
                         vachan_seq = 0
                         previous_vachan_number = 0
+                        current_vachan_num = None
                         
                         # Create new section with keyword-based name if available
                         section_name = last_section_keyword if last_section_keyword else f"Section {section_seq}"
@@ -388,15 +443,15 @@ def parse_and_ingest_pdf(pdf_path: str, book_name: str, document_id: str, db: Se
 
                     temp_original.append(text)
                     temp_page = page
+                    last_section_keyword = None
 
                 elif line_type == "meaning":
                     if temp_original:
                         temp_meaning.append(text)
                         temp_page = page
 
-                        original_num = current_original_number()
-                        meaning_num = extract_vachan_number(text)
-                        if original_num is not None and meaning_num == original_num:
+                        # Flush if meaning ends with a trailing number indicator
+                        if TRAILING_NUM_RE.search(text):
                             flush_vachan()
                     # Orphaned meaning before first vachan -> skip
 

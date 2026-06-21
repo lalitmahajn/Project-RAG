@@ -49,6 +49,7 @@ class Vachan(Base):
     original_text = Column(String, nullable=False)
     hindi_meaning = Column(String, nullable=False)
     status = Column(String(20), default="draft")  # draft, review, approved
+    embedding = Column(String, nullable=True)  # JSON-serialized float array
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships

@@ -45,6 +45,7 @@ def search(
     page_number: Optional[int] = Query(None),
     vachan_number: Optional[int] = Query(None),
     include_drafts: bool = Query(False),
+    search_type: str = Query("keyword"),
     db: Session = Depends(get_db)
 ):
     results = search_service(
@@ -54,6 +55,7 @@ def search(
         chapter_number=chapter_number,
         page_number=page_number,
         vachan_number=vachan_number,
-        include_drafts=include_drafts
+        include_drafts=include_drafts,
+        search_type=search_type
     )
     return results

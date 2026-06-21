@@ -53,8 +53,187 @@ interface ChatMessage {
   }>;
 }
 
+const highlightText = (text: string, term: string) => {
+  if (!term || !text) return text;
+  
+  const escapedTerm = term.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+  const regex = new RegExp(`(${escapedTerm})`, 'gi');
+  const parts = text.split(regex);
+  
+  return parts.map((part, idx) => 
+    regex.test(part) ? <mark key={idx} className="search-highlight">{part}</mark> : part
+  );
+};
+
+const renderFormattedText = (text: string) => {
+  if (!text) return null;
+  
+  const queryMatch = text.match(/Found \d+ result\(s\) for "(.*?)":/);
+  const highlightQuery = queryMatch ? queryMatch[1] : '';
+
+  const lines = text.split('\n');
+  return lines.map((line, lineIdx) => {
+    const trimmed = line.trim();
+    if (trimmed === '') {
+      return <div key={lineIdx} style={{ height: '0.4rem' }} />;
+    }
+    
+    const parseLineContent = (content: string) => {
+      interface Token {
+        type: 'text' | 'bold' | 'citation';
+        start: number;
+        end: number;
+        text: string;
+        bookName?: string;
+        chapterNumber?: number;
+        vachanNumber?: number;
+      }
+      
+      const tokens: Token[] = [];
+      
+      // 1. Find bold matches
+      const boldRegex = /\*\*(.*?)\*\*/g;
+      let boldMatch;
+      while ((boldMatch = boldRegex.exec(content)) !== null) {
+        tokens.push({
+          type: 'bold',
+          start: boldMatch.index,
+          end: boldMatch.index + boldMatch[0].length,
+          text: boldMatch[1]
+        });
+      }
+      
+      // 2. Find citation matches
+      // e.g. (ब्रम्हचारी विठ्ठलराव के सम्वाद, अध्याय 3, पृष्ठ 75, वचन 62)
+      const citationRegex = /\(([^,)]+),\s*अध्याय\s*(\d+),\s*(?:पृष्ठ\s*(\d+),\s*)?वचन\s*(\d+(?:\s*,\s*\d+)*)\)/g;
+      let citMatch;
+      while ((citMatch = citationRegex.exec(content)) !== null) {
+        const bookName = citMatch[1].trim();
+        const chapterNumber = parseInt(citMatch[2]);
+        const vachanStr = citMatch[4].trim();
+        const firstVachan = parseInt(vachanStr.split(',')[0].trim());
+        
+        tokens.push({
+          type: 'citation',
+          start: citMatch.index,
+          end: citMatch.index + citMatch[0].length,
+          text: `📖 ${bookName.replace('ब्रम्हचारी ', '')} - Ch ${chapterNumber}, v.${vachanStr}`,
+          bookName: bookName,
+          chapterNumber: chapterNumber,
+          vachanNumber: firstVachan
+        });
+      }
+      
+      // Sort and filter out overlaps
+      tokens.sort((a, b) => a.start - b.start);
+      
+      const finalParts: React.ReactNode[] = [];
+      let lastIdx = 0;
+      
+      const pushHighlightedText = (textToHighlight: string) => {
+        const res = highlightText(textToHighlight, highlightQuery);
+        if (Array.isArray(res)) {
+          finalParts.push(...res);
+        } else {
+          finalParts.push(res);
+        }
+      };
+      
+      for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i];
+        if (token.start < lastIdx) continue;
+        
+        if (token.start > lastIdx) {
+          pushHighlightedText(content.substring(lastIdx, token.start));
+        }
+        
+        if (token.type === 'bold') {
+          const res = highlightText(token.text, highlightQuery);
+          finalParts.push(
+            <strong key={`bold-${token.start}`}>
+              {Array.isArray(res) ? res : [res]}
+            </strong>
+          );
+        } else if (token.type === 'citation') {
+          const citObj = {
+            book_name: token.bookName || '',
+            chapter_number: token.chapterNumber || 1,
+            page_number: 0,
+            vachan_number: token.vachanNumber || 1
+          };
+          
+          finalParts.push(
+            <span 
+              key={`citation-${token.start}`} 
+              className="citation-badge clickable"
+              onClick={() => handleCitationClick(citObj)}
+              title={`Click to navigate to ${token.bookName} Chapter ${token.chapterNumber}, Vachan ${token.vachanNumber}`}
+            >
+              {token.text}
+            </span>
+          );
+        }
+        
+        lastIdx = token.end;
+      }
+      
+      if (lastIdx < content.length) {
+        pushHighlightedText(content.substring(lastIdx));
+      }
+      
+      return finalParts;
+    };
+
+    if (trimmed.startsWith('### ')) {
+      return <h4 key={lineIdx} className="chat-md-h4">{parseLineContent(trimmed.substring(4))}</h4>;
+    }
+    if (trimmed.startsWith('## ')) {
+      return <h3 key={lineIdx} className="chat-md-h3">{parseLineContent(trimmed.substring(3))}</h3>;
+    }
+    if (trimmed.startsWith('# ')) {
+      return <h2 key={lineIdx} className="chat-md-h2">{parseLineContent(trimmed.substring(2))}</h2>;
+    }
+
+    if (trimmed.startsWith('> ')) {
+      return (
+        <blockquote key={lineIdx} className="chat-md-blockquote">
+          {parseLineContent(trimmed.substring(2))}
+        </blockquote>
+      );
+    }
+
+    if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+      return (
+        <li key={lineIdx} className="chat-md-li">
+          {parseLineContent(trimmed.substring(2))}
+        </li>
+      );
+    }
+
+    if (line.startsWith('   ') || line.startsWith('\t') || line.startsWith('  ')) {
+      return (
+        <div key={lineIdx} className="chat-text-indented">
+          {parseLineContent(line)}
+        </div>
+      );
+    }
+    
+    const isHeading = line.startsWith('Found ') || /^\d+\./.test(trimmed) || trimmed.startsWith('**');
+    
+    return (
+      <div 
+        key={lineIdx} 
+        className={isHeading ? "chat-text-heading" : "chat-text-line"}
+      >
+        {parseLineContent(line)}
+      </div>
+    );
+  });
+};
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<'browse' | 'search' | 'admin'>('browse');
+  const [leftPanelOpen, setLeftPanelOpen] = useState<boolean>(false);
   
   // Scripture Browse State
   const [books, setBooks] = useState<Book[]>([]);
@@ -70,11 +249,21 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<Vachan[]>([]);
   
   // Assistant Chat State
-  const [chatMode, setChatMode] = useState<'strict' | 'commentary'>('strict');
+  const [chatMode, setChatMode] = useState<'strict' | 'commentary' | 'search'>('strict');
   const [chatInput, setChatInput] = useState<string>('');
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [isChatLoading, setIsChatLoading] = useState<boolean>(false);
+  const [chatSearchType, setChatSearchType] = useState<'keyword' | 'semantic' | 'hybrid'>('keyword');
+  const [generalSearchType, setGeneralSearchType] = useState<'keyword' | 'semantic' | 'hybrid'>('keyword');
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Citation Navigation & Highlight State
+  const [pendingCitation, setPendingCitation] = useState<{
+    bookName: string;
+    chapterNumber: number;
+    vachanNumber: number;
+  } | null>(null);
+  const [highlightedVachanNumber, setHighlightedVachanNumber] = useState<number | null>(null);
 
   // Admin State
   const [uploadBookName, setUploadBookName] = useState<string>('');
@@ -111,9 +300,83 @@ export default function App() {
     }
   }, [selectedChapterId]);
 
-  // Scroll to bottom of chat
+  // helper to scroll and highlight vachan card
+  const scrollToAndHighlightVachan = (vachanNum: number) => {
+    setTimeout(() => {
+      const element = document.getElementById(`vachan-card-${vachanNum}`);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setHighlightedVachanNumber(vachanNum);
+        setPendingCitation(null);
+        setTimeout(() => {
+          setHighlightedVachanNumber(null);
+        }, 3000);
+      }
+    }, 150);
+  };
+
+  // Observe chapters changes to handle pending citation navigation
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (pendingCitation && chapters.length > 0) {
+      const targetChapter = chapters.find(c => c.chapter_number === pendingCitation.chapterNumber);
+      if (targetChapter) {
+        if (selectedChapterId !== targetChapter.id) {
+          setSelectedChapterId(targetChapter.id);
+        } else {
+          // Chapter already selected, force reload vachans
+          fetchVachans(targetChapter.id);
+        }
+      }
+    }
+  }, [chapters, pendingCitation]);
+
+  // Observe vachans changes to handle pending citation scroll
+  useEffect(() => {
+    if (pendingCitation && vachans.length > 0) {
+      const hasVachan = vachans.some(v => v.vachan_number === pendingCitation.vachanNumber);
+      if (hasVachan) {
+        scrollToAndHighlightVachan(pendingCitation.vachanNumber);
+      }
+    }
+  }, [vachans, pendingCitation]);
+
+  const handleCitationClick = (citation: { book_name: string; chapter_number: number; page_number: number; vachan_number: number }) => {
+    setLeftPanelOpen(true);
+    setActiveTab('browse');
+
+    const targetBook = books.find(b => b.name === citation.book_name);
+    if (!targetBook) return;
+
+    setPendingCitation({
+      bookName: citation.book_name,
+      chapterNumber: citation.chapter_number,
+      vachanNumber: citation.vachan_number
+    });
+
+    if (selectedBookId !== targetBook.id) {
+      setSelectedBookId(targetBook.id);
+    } else {
+      const targetChapter = chapters.find(c => c.chapter_number === citation.chapter_number);
+      if (targetChapter) {
+        if (selectedChapterId !== targetChapter.id) {
+          setSelectedChapterId(targetChapter.id);
+        } else {
+          scrollToAndHighlightVachan(citation.vachan_number);
+        }
+      }
+    }
+  };
+
+  // Scroll to bottom of chat only when a new message is added
+  const prevChatLenRef = useRef(0);
+  useEffect(() => {
+    if (chatHistory.length > prevChatLenRef.current) {
+      // Small delay to let the DOM render, then scroll
+      setTimeout(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 100);
+    }
+    prevChatLenRef.current = chatHistory.length;
   }, [chatHistory]);
 
   const fetchBooks = async () => {
@@ -155,7 +418,7 @@ export default function App() {
 
   const executeSearch = async () => {
     try {
-      let url = `${API_BASE}/search?q=${encodeURIComponent(searchQuery)}&include_drafts=false`;
+      let url = `${API_BASE}/search?q=${encodeURIComponent(searchQuery)}&include_drafts=false&search_type=${generalSearchType}`;
       if (searchBookId) url += `&book_id=${searchBookId}`;
       if (searchChapterNum) url += `&chapter_number=${searchChapterNum}`;
       
@@ -183,6 +446,7 @@ export default function App() {
         body: JSON.stringify({
           question: userMsg.text,
           mode: chatMode,
+          search_type: chatSearchType,
           history: chatHistory.map(m => ({ role: m.sender === 'user' ? 'user' : 'model', parts: [m.text] }))
         })
       });
@@ -337,8 +601,16 @@ export default function App() {
         
         {/* Tab 1: Browse */}
         {activeTab === 'browse' && (
-          <div className="portal-layout animate-fade-in">
-            <div className="left-panel">
+          <div className={`portal-layout animate-fade-in ${!leftPanelOpen ? 'panel-collapsed' : ''}`}>
+            {/* Collapse toggle */}
+            <button 
+              className="panel-toggle-btn"
+              onClick={() => setLeftPanelOpen(!leftPanelOpen)}
+              title={leftPanelOpen ? 'Collapse scriptures' : 'Show scriptures'}
+            >
+              {leftPanelOpen ? '◀ Hide Scriptures' : '▶ Browse Scriptures'}
+            </button>
+            {leftPanelOpen && <div className="left-panel">
               <div className="glass-card search-controls" style={{ gap: '1.5rem', flexWrap: 'nowrap' }}>
                 <div className="input-group" style={{ flex: 1 }}>
                   <label className="input-label">Select Book</label>
@@ -374,7 +646,13 @@ export default function App() {
                   </div>
                 ) : (
                   vachans.map(v => (
-                    <div key={v.id} className="glass-card vachan-card animate-fade-in">
+                    <div 
+                      key={v.id} 
+                      id={`vachan-card-${v.vachan_number}`}
+                      className={`glass-card vachan-card animate-fade-in ${
+                        highlightedVachanNumber === v.vachan_number ? 'vachan-highlight-glowing' : ''
+                      }`}
+                    >
                       <div className="vachan-meta">
                         <span className="meta-badge">Vachan {v.vachan_number}</span>
                         <span>Page {v.page_number}</span>
@@ -385,26 +663,48 @@ export default function App() {
                   ))
                 )}
               </div>
-            </div>
+            </div>}
 
             {/* AI Assistant Chat on Right Side */}
             <div className="right-panel">
               <div className="assistant-container">
-                <div className="assistant-header">
-                  <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>AI Research Assistant</div>
-                  <div className="assistant-mode-toggle">
-                    <button 
-                      className={`mode-btn ${chatMode === 'strict' ? 'active' : ''}`}
-                      onClick={() => setChatMode('strict')}
+                <div className="assistant-header" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.75rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>AI Research Assistant</div>
+                    <div className="assistant-mode-toggle">
+                      <button 
+                        className={`mode-btn ${chatMode === 'strict' ? 'active' : ''}`}
+                        onClick={() => setChatMode('strict')}
+                      >
+                        Strict
+                      </button>
+                      <button 
+                        className={`mode-btn ${chatMode === 'commentary' ? 'active' : ''}`}
+                        onClick={() => setChatMode('commentary')}
+                      >
+                        Commentary
+                      </button>
+                      <button 
+                        className={`mode-btn ${chatMode === 'search' ? 'active' : ''}`}
+                        onClick={() => setChatMode('search')}
+                      >
+                        Search
+                      </button>
+                    </div>
+                  </div>
+                  
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid hsla(var(--border), 0.5)', paddingTop: '0.75rem', fontSize: '0.85rem' }}>
+                    <span style={{ color: 'hsl(var(--text-muted))', fontWeight: 500 }}>Search Strategy:</span>
+                    <select 
+                      className="filter-select"
+                      style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem', height: 'auto' }}
+                      value={chatSearchType}
+                      onChange={(e) => setChatSearchType(e.target.value as 'keyword' | 'semantic' | 'hybrid')}
                     >
-                      Strict
-                    </button>
-                    <button 
-                      className={`mode-btn ${chatMode === 'commentary' ? 'active' : ''}`}
-                      onClick={() => setChatMode('commentary')}
-                    >
-                      Commentary
-                    </button>
+                      <option value="keyword">Keyword (FTS5)</option>
+                      <option value="semantic">Semantic (Vector)</option>
+                      <option value="hybrid">Hybrid</option>
+                    </select>
                   </div>
                 </div>
 
@@ -412,26 +712,37 @@ export default function App() {
                 <div className="chat-history">
                   {chatHistory.length === 0 && (
                     <div style={{ margin: 'auto', textAlign: 'center', padding: '1rem', color: 'hsl(var(--text-muted))', fontSize: '0.85rem' }}>
-                      Ask me questions about teachings, compare Vachans, or search concepts. I will search the scripture database and cite sources.
+                      {chatMode === 'search'
+                        ? 'Search scripture terms directly — no LLM needed. Results come straight from the database.'
+                        : 'Ask me questions about teachings, compare Vachans, or search concepts. I will search the scripture database and cite sources.'
+                      }
                     </div>
                   )}
-                  {chatHistory.map((m, idx) => (
-                    <div key={idx} className={`chat-msg ${m.sender}`}>
-                      <div>{m.text}</div>
+                  {chatHistory.map((m, idx) => {
+                    const isError = m.text.includes('Rate Limit Exceeded') || m.text.includes('Error running Gemini');
+                    return (
+                      <div key={idx} className={`chat-msg ${m.sender} ${isError ? 'error-msg' : ''}`}>
+                      <div className="chat-msg-body">{renderFormattedText(m.text)}</div>
                       {m.citations && m.citations.length > 0 && (
                         <div>
                           <div className="citations-title">Sources:</div>
                           <div className="citation-list">
                             {m.citations.map((c, cIdx) => (
-                              <span key={cIdx} className="citation-item">
+                              <span 
+                                key={cIdx} 
+                                className="citation-item clickable"
+                                onClick={() => handleCitationClick(c)}
+                                title="Click to view in scriptures"
+                              >
                                 {c.book_name} - Ch {c.chapter_number}, p.{c.page_number}, v.{c.vachan_number}
                               </span>
                             ))}
                           </div>
                         </div>
                       )}
-                    </div>
-                  ))}
+                      </div>
+                    );
+                  })}
                   {isChatLoading && (
                     <div className="chat-msg assistant" style={{ fontStyle: 'italic', color: 'hsl(var(--text-muted))' }}>
                       Analyzing scripture references...
@@ -445,7 +756,7 @@ export default function App() {
                   <input 
                     type="text" 
                     className="text-input" 
-                    placeholder="Ask scripture questions..." 
+                    placeholder={chatMode === 'search' ? 'Search terms (e.g. राम, गुरु, भक्ति)...' : 'Ask scripture questions...'} 
                     style={{ flex: 1 }}
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
@@ -464,15 +775,27 @@ export default function App() {
             <div className="left-panel">
               <div className="glass-card search-controls">
                 <div className="search-bar-container input-group">
-                  <label className="input-label">FTS5 Search Query</label>
+                  <label className="input-label">Search Query</label>
                   <input 
                     type="text" 
                     className="text-input" 
-                    placeholder="Enter keywords (e.g. राम, गुरु, भक्ति)..."
+                    placeholder="Enter keywords or concepts..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && executeSearch()}
                   />
+                </div>
+                <div className="input-group" style={{ minWidth: '150px' }}>
+                  <label className="input-label">Search Strategy</label>
+                  <select 
+                    className="filter-select"
+                    value={generalSearchType}
+                    onChange={(e) => setGeneralSearchType(e.target.value as 'keyword' | 'semantic' | 'hybrid')}
+                  >
+                    <option value="keyword">Keyword (FTS5)</option>
+                    <option value="semantic">Semantic (Vector)</option>
+                    <option value="hybrid">Hybrid</option>
+                  </select>
                 </div>
                 <div className="input-group" style={{ minWidth: '150px' }}>
                   <label className="input-label">Filter Book</label>
@@ -513,8 +836,8 @@ export default function App() {
                         <span className="meta-badge">{v.book_name}</span>
                         <span>Chapter {v.chapter_number} • Vachan {v.vachan_number} • Page {v.page_number}</span>
                       </div>
-                      <div className="vachan-original">{v.original_text}</div>
-                      <div className="vachan-meaning">{v.hindi_meaning}</div>
+                      <div className="vachan-original">{highlightText(v.original_text, searchQuery)}</div>
+                      <div className="vachan-meaning">{highlightText(v.hindi_meaning, searchQuery)}</div>
                     </div>
                   ))
                 )}
@@ -555,7 +878,14 @@ export default function App() {
                         type="file" 
                         ref={fileInputRef}
                         accept=".pdf"
-                        onChange={(e) => setUploadFile(e.target.files ? e.target.files[0] : null)}
+                        onChange={(e) => {
+                          const file = e.target.files ? e.target.files[0] : null;
+                          setUploadFile(file);
+                          if (file) {
+                            const baseName = file.name.replace(/\.[^/.]+$/, "");
+                            setUploadBookName(baseName);
+                          }
+                        }}
                         required
                       />
                     </div>

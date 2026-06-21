@@ -7,6 +7,13 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     
     with engine.begin() as conn:
+        # Check if embedding column exists in vachans, if not add it
+        cursor = conn.execute(text("PRAGMA table_info(vachans);"))
+        columns = [row[1] for row in cursor.fetchall()]
+        if "embedding" not in columns:
+            conn.execute(text("ALTER TABLE vachans ADD COLUMN embedding TEXT;"))
+            print("Added embedding column to vachans table.")
+
         # Create FTS5 virtual table
         conn.execute(text("""
             CREATE VIRTUAL TABLE IF NOT EXISTS vachans_fts USING fts5(

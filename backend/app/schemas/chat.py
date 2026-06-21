@@ -7,7 +7,8 @@ class ChatHistoryMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str
-    mode: str = "strict"  # strict, commentary
+    mode: str = "strict"  # strict, commentary, search
+    search_type: str = "keyword"  # keyword, semantic, hybrid
     history: Optional[List[ChatHistoryMessage]] = None
 
 class Citation(BaseModel):

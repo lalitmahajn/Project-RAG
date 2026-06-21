@@ -99,6 +99,15 @@ def update_vachan(
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(vachan, field, value)
 
+    # Regenerate embedding if approved
+    if vachan.status == "approved":
+        import json
+        from ..services.llm import generate_embedding
+        text_to_embed = f"Original: {vachan.original_text}\nMeaning: {vachan.hindi_meaning}"
+        vector = generate_embedding(text_to_embed)
+        if vector:
+            vachan.embedding = json.dumps(vector)
+
     db.commit()
     db.refresh(vachan)
     return vachan
@@ -108,12 +117,19 @@ def bulk_approve_vachans(
     ids: List[str],
     db: Session = Depends(get_db)
 ):
-    updated = db.query(Vachan).filter(Vachan.id.in_(ids)).update(
-        {"status": "approved"},
-        synchronize_session=False
-    )
+    import json
+    from ..services.llm import generate_embedding
+    vachans = db.query(Vachan).filter(Vachan.id.in_(ids)).all()
+    updated_count = 0
+    for v in vachans:
+        v.status = "approved"
+        text_to_embed = f"Original: {v.original_text}\nMeaning: {v.hindi_meaning}"
+        vector = generate_embedding(text_to_embed)
+        if vector:
+            v.embedding = json.dumps(vector)
+        updated_count += 1
     db.commit()
-    return {"message": f"Successfully approved {updated} vachans."}
+    return {"message": f"Successfully approved {updated_count} vachans."}
 
 from fastapi.responses import FileResponse
 

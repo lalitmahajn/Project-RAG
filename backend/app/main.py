@@ -29,6 +29,11 @@ app.include_router(chat_router)
 def startup_event():
     # Make sure DB schema and triggers exist on startup
     init_db()
+    
+    # Run backfill of embeddings in background thread
+    import threading
+    from .services.llm import backfill_embeddings_task
+    threading.Thread(target=backfill_embeddings_task, daemon=True).start()
 
 @app.get("/api/health")
 def health_check():

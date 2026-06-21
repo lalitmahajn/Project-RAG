@@ -29,8 +29,6 @@ dist/
 node_modules/
 
 # Node.js build output
-.next/
-.nuxt/
 dist/
 coverage/
 
@@ -38,10 +36,7 @@ coverage/
 .DS_Store
 Thumbs.db
 
-# SQLite databases (optional)
-*.db
-*.sqlite
-*.sqlite3
+
 
 # Testing
 .pytest_cache/
@@ -55,3 +50,10 @@ htmlcov/
 tmp/
 temp/
 *.tmp
+
+# Project specific ignores
+backend/parser_error.txt
+backend/parser_output.txt
+data/converted_scripture.txt
+frontend/vite.config.ts.timestamp-*
+frontend/vite.config.js.timestamp-*
